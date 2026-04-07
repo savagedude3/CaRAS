@@ -342,13 +342,21 @@ current_dir = str(pathlib.Path(__file__).parent.absolute())
 
 print('\nChecking for updates on GitHub\n')
 
-remote_directory = 'https://raw.githubusercontent.com/JSuryatenggara/CaRAS/main/caras_installation'
+# PATCH (DCC / batch-safe): compute nodes may not have reliable outbound HTTPS.
+# CaRAS originally does many requests.get() calls with no timeout, which can hang.
+# Default behavior here is to SKIP the update check unless explicitly enabled.
+skip_update_check = os.environ.get('CARAS_SKIP_UPDATE_CHECK', '1') == '1'
+if skip_update_check:
+    print('Skipping GitHub update check (CARAS_SKIP_UPDATE_CHECK=1)')
+else:
 
-caras_scripts_dir = str(pathlib.Path(__file__).parent.absolute())
-caras_installation_dir = '/'.join((caras_scripts_dir.split('/'))[:-1])
-local_directory = caras_installation_dir
+    remote_directory = 'https://raw.githubusercontent.com/JSuryatenggara/CaRAS/main/caras_installation'
 
-program_update_check_list = ['caras_scripts/caras.py',
+    caras_scripts_dir = str(pathlib.Path(__file__).parent.absolute())
+    caras_installation_dir = '/'.join((caras_scripts_dir.split('/'))[:-1])
+    local_directory = caras_installation_dir
+
+    program_update_check_list = ['caras_scripts/caras.py',
                             # 'caras_scripts/caras_dashboard.py',
                             # 'caras_scripts/caras_wizard.py',
                             'caras_scripts/caras_reads_normalizer.py',
@@ -372,39 +380,38 @@ program_update_check_list = ['caras_scripts/caras.py',
                             'chromfa_splitter.py']
 
 
-update_counter = 0
+    update_counter = 0
 
-for program in program_update_check_list:
-    
-    try:
-        remote_file = requests.get('{}/{}'.format(remote_directory, program))
-
-    except:
-        print('{} is no longer required in the latest implementation of CaRAS'.format(program.split('/')[-1]))
-        continue
+    for program in program_update_check_list:
         
-    try:
-        local_file = open('{}/{}'.format(local_directory, program), 'r')
+        try:
+            remote_file = requests.get('{}/{}'.format(remote_directory, program), timeout=10)
 
-    except:
-        print('WARNING: {} is not found in your local system'.format(program.split('/')[-1]))
-        continue
+        except:
+            print('{} is no longer required in the latest implementation of CaRAS'.format(program.split('/')[-1]))
+            continue
+        
+        try:
+            local_file = open('{}/{}'.format(local_directory, program), 'r')
+
+        except:
+            print('WARNING: {} is not found in your local system'.format(program.split('/')[-1]))
+            continue
+
+        if remote_file.text == local_file.read():
+            print('{} is up to date'.format(program.split('/')[-1]))
+
+        elif remote_file.text != local_file.read():
+            update_counter += 1
+            print('Newer version of {} is available on our github'.format(program.split('/')[-1]))
 
 
-    if remote_file.text == local_file.read():
-        print('{} is up to date'.format(program.split('/')[-1]))
+    if update_counter == 0:
+        print('\nYour CaRAS is up to date\n')
 
-    elif remote_file.text != local_file.read():
-        update_counter += 1
-        print('Newer version of {} is available on our github'.format(program.split('/')[-1]))
-
-
-if update_counter == 0:
-    print('\nYour CaRAS is up to date\n')
-
-if update_counter > 0:
-    print('\n{} updates available on our GitHub (https://github.com/JSuryatenggara/CaRAS)'.format(update_counter))
-    print('Update all at once by downloading our latest release (https://github.com/JSuryatenggara/CaRAS/releases)\n')
+    if update_counter > 0:
+        print('\n{} updates available on our GitHub (https://github.com/JSuryatenggara/CaRAS)'.format(update_counter))
+        print('Update all at once by downloading our latest release (https://github.com/JSuryatenggara/CaRAS/releases)\n')
 
 
 
@@ -953,19 +960,24 @@ print(command_line_string + '\n')
 
 distribution_name_list = ['Anaconda', 'Anaconda2', 'Anaconda3', 'Miniconda', 'Miniconda2', 'Miniconda3', 'Miniforge', 'Miniforge2', 'Miniforge3']
 
-conda_file = shutil.which('conda') # Get the full path to conda executable
+# PATCH (DCC / batch-safe): prefer the active conda env prefix
+# On clusters, `conda` is often a shell function and the actual `conda` executable found
+# by shutil.which('conda') may point to a shared Anaconda module. Also, many conda envs
+# do NOT contain a `bin/conda` binary. For our purposes (finding env-local JARs), the
+# correct base path is the active environment prefix.
+conda_dir = os.environ.get('CONDA_PREFIX', None) or getattr(sys, 'prefix', None)
 
-if any(distribution_name in conda_file.split('/') for distribution_name in distribution_name_list):
-    for distribution_name in distribution_name_list:
-        if distribution_name in conda_file.split('/'):
-            conda_dir = '{}{}'.format(conda_file.split(distribution_name)[0], distribution_name) # Get the parent directory of the conda distribution
-            break
+# Optional fallback: if conda_dir is still None, try to infer from a conda executable on PATH.
+if conda_dir is None:
+    conda_file = shutil.which('conda') # Get the full path to conda executable
+    if conda_file is not None:
+        # If this conda lives under .../<dist>/condabin/conda, infer the <dist> directory.
+        conda_dir = os.path.dirname(os.path.dirname(conda_file))
 
-elif any(distribution_name.lower() in conda_file.split('/') for distribution_name in distribution_name_list):
-    for distribution_name in distribution_name_list:
-        if distribution_name.lower() in conda_file.split('/'):
-            conda_dir = '{}{}'.format(conda_file.split(distribution_name.lower())[0], distribution_name.lower()) # Get the parent directory of the conda distribution
-            break
+if conda_dir is None:
+    print('ERROR: could not determine conda_dir (could not find conda in PATH and CONDA_PREFIX was not set).')
+    print('Fix: activate your conda env before running CaRAS, e.g. `source .../conda.sh && conda activate caras_env`')
+    exit()
 
 
 print('Checking for suite requirements')
@@ -5909,5 +5921,4 @@ if args.run:
     subprocess.run(master_script_name, shell = True)
 elif not args.run:
     print('\nNOTICE ::: The suite now can be started manually by running MASTER_script.sh in {} ::: NOTICE\n'.format(output_dir))
-
 
